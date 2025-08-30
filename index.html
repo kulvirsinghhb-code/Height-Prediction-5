@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Height Prediction Calculator</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; background: #f4f8fc; }
+    .container { max-width: 800px; margin: auto; background: white; padding: 20px;
+                 border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    h1 { text-align: center; color: #333; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, select, button {
+      width: 100%; padding: 8px; margin-top: 5px;
+      border-radius: 8px; border: 1px solid #ccc;
+    }
+    button { background: #0078D7; color: white; font-size: 16px; margin-top: 20px;
+             cursor: pointer; transition: 0.3s; }
+    button:hover { background: #005a9e; }
+    .result { margin-top: 20px; padding: 15px; background: #e8f4ff;
+              border-radius: 10px; border-left: 5px solid #0078D7; }
+    canvas { margin-top: 30px; }
+  </style>
+</head>
+<body>
+  <h1>Height Prediction Calculator</h1>
+  <div class="container">
+
+    <label><input type="radio" name="method" value="1" checked> Method 1 – If only child's height is known</label>
+    <label><input type="radio" name="method" value="2"> Method 2 – If child's and both parents' height is known</label>
+    <br><br>
+
+    <label for="name">Name:</label>
+    <input type="text" id="name" placeholder="Enter child's name">
+
+    <label for="state">State:</label>
+    <input type="text" id="state" placeholder="Enter state">
+
+    <label for="district">District:</label>
+    <input type="text" id="district" placeholder="Enter district">
+
+    <label for="gender">Gender:</label>
+    <select id="gender">
+      <option value="Male">Male</option>
+      <option value="Female">Female</option>
+    </select>
+
+    <label for="age">Current Age (years, decimals allowed):</label>
+    <input type="number" step="0.1" id="age" placeholder="e.g. 7.5">
+
+    <label for="height">Current Height (cm):</label>
+    <input type="number" step="0.1" id="height" placeholder="e.g. 125.4">
+
+    <!-- Extra fields for Method 2 -->
+    <div id="parentFields" style="display:none;">
+      <label for="motherHeight">Mother's Height (cm):</label>
+      <input type="number" step="0.1" id="motherHeight" placeholder="e.g. 160.2">
+
+      <label for="fatherHeight">Father's Height (cm):</label>
+      <input type="number" step="0.1" id="fatherHeight" placeholder="e.g. 174.5">
+    </div>
+
+    <button onclick="predictHeight()">Predict</button>
+    <button id="printBtn" onclick="window.print()" style="display:none;">🖨 Print Results</button>
+
+    <div id="results" class="result" style="display:none;"></div>
+    <canvas id="growthChart" width="700" height="400"></canvas>
+  </div>
+
+  <script>
+    let chart; // global chart instance
+
+    // Show/hide parent fields based on method
+    document.querySelectorAll('input[name="method"]').forEach(el => {
+      el.addEventListener("change", () => {
+        const method = document.querySelector('input[name="method"]:checked').value;
+        document.getElementById("parentFields").style.display = (method === "2") ? "block" : "none";
+      });
+    });
+
+    async function predictHeight() {
+      const method = document.querySelector('input[name="method"]:checked').value;
+      const name = document.getElementById("name").value.trim();
+      const state = document.getElementById("state").value.trim();
+      const district = document.getElementById("district").value.trim();
+      const gender = document.getElementById("gender").value;
+      const age = parseFloat(document.getElementById("age").value);
+      const currentHeight = parseFloat(document.getElementById("height").value);
+      const resultBox = document.getElementById("results");
+
+      if (!name || !state || !district || isNaN(age) || isNaN(currentHeight)) {
+        resultBox.style.display = "block";
+        resultBox.innerHTML = "❌ Please fill all fields correctly.";
+        return;
+      }
+
+      // --- Load data file for child growth curves ---
+      const file = gender === "Male" ? "Male.json" : "Female.json";
+      const response = await fetch(file);
+      const json = await response.json();
+      const data = json.data;
+
+      // --- Method 1 (child percentile approach) ---
+      const lower = data.reduce((prev, curr) =>
+        curr.Age <= age ? curr : prev, data[0]);
+      const upper = data.find(item => item.Age >= age) || data[data.length-1];
+      const factor = (age - lower.Age) / (upper.Age - lower.Age || 1);
+
+      const percentiles = Object.keys(lower).filter(k => k !== "Age");
+      const interpolated = {};
+      percentiles.forEach(p => {
+        interpolated[p] = lower[p] + factor * (upper[p] - lower[p]);
+      });
+
+      let nearest = percentiles[0];
+      let minDiff = Math.abs(interpolated[nearest] - currentHeight);
+      percentiles.forEach(p => {
+        const diff = Math.abs(interpolated[p] - currentHeight);
+        if (diff < minDiff) { minDiff = diff; nearest = p; }
+      });
+
+      const adultRow = data.find(r => r.Age === 18);
+      const predicted1 = adultRow[nearest];
+
+      // Range ±1.75%
+      const sd1 = predicted1 * 0.0175;
+      const lower1 = (predicted1 - sd1).toFixed(2);
+      const upper1 = (predicted1 + sd1).toFixed(2);
+
+      // --- If Method 2 is selected ---
+      let resultsHTML = `
+        👤 Name: <b>${name}</b><br>
+        ⚧ Gender: <b>${gender}</b><br>
+        🎂 Age: <b>${age} years</b><br>
+        📏 Child's Height: <b>${currentHeight} cm</b><br>
+      `;
+
+      if (method === "1") {
+        resultsHTML += `
+          <br>🔮 Predicted Height: <b>${predicted1} cm</b><br>
+          Range (±1.75%): <b>${lower1} – ${upper1} cm</b>
+        `;
+      } else {
+        const motherHeight = parseFloat(document.getElementById("motherHeight").value);
+        const fatherHeight = parseFloat(document.getElementById("fatherHeight").value);
+
+        if (isNaN(motherHeight) || isNaN(fatherHeight)) {
+          resultBox.style.display = "block";
+          resultBox.innerHTML = "❌ Please enter both mother and father height.";
+          return;
+        }
+
+        // Load MPH file
+        const mphFile = gender === "Male" ? "male mph.json" : "female mph.json";
+        const mphResponse = await fetch(mphFile);
+        const mphJson = await mphResponse.json();
+        const mphData = mphJson.data;
+
+        const mph = Math.round((motherHeight + fatherHeight) / 2);
+        // Find closest percentile in MPH table
+        const mphRow = mphData.find(r => r.MPH === mph);
+        let predicted2 = null;
+        if (mphRow) {
+          predicted2 = mphRow["P50"]; // assuming MPH files have percentiles like P3, P50, etc
+        } else {
+          predicted2 = mph; // fallback
+        }
+
+        // Average of method1 and method2
+        const avgHeight = ((predicted1 + predicted2) / 2).toFixed(2);
+        const avgSD = avgHeight * 0.0175;
+        const avgLower = (avgHeight - avgSD).toFixed(2);
+        const avgUpper = (avgHeight + avgSD).toFixed(2);
+
+        resultsHTML += `
+          👩 Mother's Height: <b>${motherHeight} cm</b><br>
+          👨 Father's Height: <b>${fatherHeight} cm</b><br><br>
+
+          📊 Height 1 (Child percentile method): <b>${predicted1} cm</b><br>
+          Range (±1.75%): <b>${lower1} – ${upper1} cm</b><br><br>
+
+          📊 Height 2 (Average of Method 1 & 2): <b>${avgHeight} cm</b><br>
+          Range (±1.75%): <b>${avgLower} – ${avgUpper} cm</b>
+        `;
+      }
+
+      resultBox.style.display = "block";
+      resultBox.innerHTML = resultsHTML;
+      document.getElementById("printBtn").style.display = "inline-block"; // show print
+    }
+  </script>
+</body>
+</html>
