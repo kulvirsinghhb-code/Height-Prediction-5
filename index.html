@@ -1,0 +1,183 @@
+<script>
+let chart; // global chart instance
+
+// Show/hide parent fields based on method
+document.querySelectorAll('input[name="method"]').forEach(el => {
+  el.addEventListener("change", () => {
+    const method = document.querySelector('input[name="method"]:checked').value;
+    document.getElementById("parentFields").style.display = (method === "2") ? "block" : "none";
+  });
+});
+
+async function predictHeight() {
+  const method = document.querySelector('input[name="method"]:checked').value;
+  const name = document.getElementById("name").value.trim();
+  const state = document.getElementById("state").value.trim();
+  const district = document.getElementById("district").value.trim();
+  const gender = document.getElementById("gender").value;
+  const age = parseFloat(document.getElementById("age").value);
+  const currentHeight = parseFloat(document.getElementById("height").value);
+  const resultBox = document.getElementById("results");
+
+  if (!name || !state || !district || isNaN(age) || isNaN(currentHeight)) {
+    resultBox.style.display = "block";
+    resultBox.innerHTML = "❌ Please fill all fields correctly.";
+    return;
+  }
+
+  // --- Load child dataset ---
+  const file = gender === "Male" ? "Male.json" : "Female.json";
+  const response = await fetch(file);
+  const json = await response.json();
+  const data = json.data;
+
+  // --- Method 1 (percentile method) ---
+  const lower = data.reduce((prev, curr) =>
+    curr.Age <= age ? curr : prev, data[0]);
+  const upper = data.find(item => item.Age >= age) || data[data.length-1];
+  const factor = (age - lower.Age) / (upper.Age - lower.Age || 1);
+
+  const percentiles = Object.keys(lower).filter(k => k !== "Age");
+  const interpolated = {};
+  percentiles.forEach(p => {
+    interpolated[p] = lower[p] + factor * (upper[p] - lower[p]);
+  });
+
+  let nearest = percentiles[0];
+  let minDiff = Math.abs(interpolated[nearest] - currentHeight);
+  percentiles.forEach(p => {
+    const diff = Math.abs(interpolated[p] - currentHeight);
+    if (diff < minDiff) { minDiff = diff; nearest = p; }
+  });
+
+  const adultRow = data.find(r => r.Age === 18);
+  const predicted1 = adultRow[nearest];
+  const sd1 = predicted1 * 0.0175;
+  const lower1 = (predicted1 - sd1).toFixed(2);
+  const upper1 = (predicted1 + sd1).toFixed(2);
+
+  let resultsHTML = `
+    👤 Name: <b>${name}</b><br>
+    ⚧ Gender: <b>${gender}</b><br>
+    🎂 Age: <b>${age} years</b><br>
+    📏 Child's Height: <b>${currentHeight} cm</b><br>
+  `;
+
+  let plotPoints = [
+    {x: age, y: currentHeight, color:"red", label:"Current"},
+    {x: 18, y: predicted1, color:"green", label:"Height 1"}
+  ];
+
+  if (method === "1") {
+    resultsHTML += `
+      <br>🔮 Predicted Height (Height 1): <b>${predicted1} cm</b><br>
+      Range (±1.75%): <b>${lower1} – ${upper1} cm</b>
+    `;
+  } else {
+    const motherHeight = parseFloat(document.getElementById("motherHeight").value);
+    const fatherHeight = parseFloat(document.getElementById("fatherHeight").value);
+
+    if (isNaN(motherHeight) || isNaN(fatherHeight)) {
+      resultBox.style.display = "block";
+      resultBox.innerHTML = "❌ Please enter both mother and father height.";
+      return;
+    }
+
+    // Load MPH dataset
+    const mphFile = gender === "Male" ? "male mph.json" : "female mph.json";
+    const mphResponse = await fetch(mphFile);
+    const mphJson = await mphResponse.json();
+    const mphData = mphJson.data;
+
+    const mph = Math.round((motherHeight + fatherHeight) / 2);
+
+    // Find closest row in mphData
+    let mphRow = mphData.reduce((prev, curr) =>
+      Math.abs(curr.MPH - mph) < Math.abs(prev.MPH - mph) ? curr : prev, mphData[0]);
+
+    // Use same percentile as Method 1
+    let predicted2 = mphRow[nearest];
+    const sd2 = predicted2 * 0.0175;
+    const lower2 = (predicted2 - sd2).toFixed(2);
+    const upper2 = (predicted2 + sd2).toFixed(2);
+
+    // Average
+    const avgHeight = ((predicted1 + predicted2) / 2).toFixed(2);
+    const avgSD = avgHeight * 0.0175;
+    const avgLower = (avgHeight - avgSD).toFixed(2);
+    const avgUpper = (avgHeight + avgSD).toFixed(2);
+
+    resultsHTML += `
+      👩 Mother's Height: <b>${motherHeight} cm</b><br>
+      👨 Father's Height: <b>${fatherHeight} cm</b><br><br>
+
+      📊 Height 1 (Child percentile method): <b>${predicted1} cm</b><br>
+      Range (±1.75%): <b>${lower1} – ${upper1} cm</b><br><br>
+
+      📊 Height 2 (Average of Method 1 & 2): <b>${avgHeight} cm</b><br>
+      Range (±1.75%): <b>${avgLower} – ${avgUpper} cm</b>
+    `;
+
+    plotPoints.push({x:18, y: avgHeight, color:"blue", label:"Height 2"});
+  }
+
+  // --- Results box ---
+  resultBox.style.display = "block";
+  resultBox.innerHTML = resultsHTML;
+  document.getElementById("printBtn").style.display = "inline-block";
+
+  // --- Growth chart ---
+  const ages = data.map(d => d.Age);
+  const chartPercentiles = ["P3","P10","P25","P50","P75","P90","P97"];
+
+  const datasets = chartPercentiles.map(p => ({
+    label: p,
+    data: data.map(d => d[p]),
+    borderColor: getColor(p),
+    fill: false,
+    tension: 0.1
+  }));
+
+  // Add points (always in front, bigger circles)
+  plotPoints.forEach(pt => {
+    datasets.push({
+      label: pt.label,
+      data: [{x: pt.x, y: pt.y}],
+      borderColor: pt.color,
+      backgroundColor: pt.color,
+      pointRadius: 10,
+      pointStyle: "circle",
+      showLine: false
+    });
+  });
+
+  if (chart) chart.destroy();
+  const ctx = document.getElementById("growthChart").getContext("2d");
+  chart = new Chart(ctx, {
+    type: "line",
+    data: { datasets },
+    options: {
+      parsing:false,
+      responsive:true,
+      plugins:{ legend:{ position:"bottom" } },
+      scales:{
+        x:{ title:{ display:true, text:"Age (years)" }, type:"linear" },
+        y:{ title:{ display:true, text:"Height (cm)" } }
+      }
+    }
+  });
+}
+
+function getColor(p) {
+  const colors = {
+    "P3": "rgba(255,99,132,1)",
+    "P10": "rgba(255,159,64,1)",
+    "P25": "rgba(255,205,86,1)",
+    "P50": "rgba(75,192,192,1)",
+    "P75": "rgba(54,162,235,1)",
+    "P90": "rgba(153,102,255,1)",
+    "P97": "rgba(201,203,207,1)"
+  };
+  return colors[p] || "black";
+}
+</script>
