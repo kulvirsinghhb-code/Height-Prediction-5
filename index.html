@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Height Prediction Calculator</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; background: #f4f8fc; }
+    .container { max-width: 800px; margin: auto; background: white; padding: 20px;
+                 border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    h1 { text-align: center; color: #333; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, select, button {
+      width: 100%; padding: 8px; margin-top: 5px;
+      border-radius: 8px; border: 1px solid #ccc;
+    }
+    button { background: #0078D7; color: white; font-size: 16px; margin-top: 20px;
+             cursor: pointer; transition: 0.3s; }
+    button:hover { background: #005a9e; }
+    .result { margin-top: 20px; padding: 15px; background: #e8f4ff;
+              border-radius: 10px; border-left: 5px solid #0078D7; white-space:pre-wrap;}
+    canvas { margin-top: 30px; }
+    .choiceBtn { width: 100%; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Height Prediction Calculator</h1>
+  <div class="container">
+
+    <!-- Initial choice -->
+    <div id="methodChoice">
+      <button class="choiceBtn" onclick="selectMethod(1)">👉 If only child's height is known</button>
+      <button class="choiceBtn" onclick="selectMethod(2)">👉 If both child's and parents' heights are known</button>
+    </div>
+
+    <!-- Common inputs -->
+    <div id="commonInputs" style="display:none;">
+      <label for="name">Name:</label>
+      <input type="text" id="name" placeholder="Enter child's name">
+
+      <label for="state">State:</label>
+      <input type="text" id="state" placeholder="Enter state">
+
+      <label for="district">District:</label>
+      <input type="text" id="district" placeholder="Enter district">
+
+      <label for="gender">Gender:</label>
+      <select id="gender">
+        <option value="Male">Male</option>
+        <option value="Female">Female</option>
+      </select>
+
+      <label for="age">Current Age (years, decimals allowed):</label>
+      <input type="number" step="0.1" id="age" placeholder="e.g. 7.5">
+
+      <label for="height">Current Height (cm):</label>
+      <input type="number" step="0.1" id="height" placeholder="e.g. 125.4">
+    </div>
+
+    <!-- Extra inputs for parents (only if Method 2) -->
+    <div id="parentInputs" style="display:none;">
+      <label for="motherHeight">Mother's Height (cm):</label>
+      <input type="number" id="motherHeight" placeholder="e.g. 160">
+
+      <label for="fatherHeight">Father's Height (cm):</label>
+      <input type="number" id="fatherHeight" placeholder="e.g. 172">
+    </div>
+
+    <button id="predictBtn" style="display:none;" onclick="predictHeight()">Predict</button>
+    <button onclick="window.print()">🖨 Print Results</button>
+
+    <div id="results" class="result" style="display:none;"></div>
+
+    <canvas id="growthChart" width="700" height="400"></canvas>
+  </div>
+
+  <script>
+    let chart; 
+    let selectedMethod = null;
+
+    function selectMethod(method) {
+      selectedMethod = method;
+      document.getElementById("methodChoice").style.display = "none";
+      document.getElementById("commonInputs").style.display = "block";
+      document.getElementById("predictBtn").style.display = "block";
+      if (method === 2) {
+        document.getElementById("parentInputs").style.display = "block";
+      }
+    }
+
+    async function predictHeight() {
+      if (selectedMethod === 1) {
+        await method1Prediction();
+      } else if (selectedMethod === 2) {
+        await method2CombinedPrediction();
+      } else {
+        alert("Please choose an option first.");
+      }
+    }
+
+    // -------------------------------
+    // METHOD 1 (existing logic)
+    async function method1Prediction() {
+      const resultBox = document.getElementById("results");
+      const { name, state, district, gender, age, currentHeight } = getChildInputs();
+      if (!validateChildInputs(name, state, district, age, currentHeight)) return;
+
+      try {
+        const out = await calcMethod1(gender, age, currentHeight);
+        showResultBox(formatHeight1Output(name, state, district, age, currentHeight, out));
+        // log to sheet if you want
+        // logToSheet({...})
+      } catch (err) {
+        console.error(err);
+        resultBox.style.display = "block";
+        resultBox.innerText = "❌ Error loading growth data. See console.";
+      }
+    }
+
+    // -------------------------------
+    // METHOD 2 (Calculate both Height 1 & Height 2)
+    async function method2CombinedPrediction() {
+      const resultBox = document.getElementById("results");
+      const { name, state, district, gender, age, currentHeight } = getChildInputs();
+      const motherHeight = parseFloat(document.getElementById("motherHeight").value);
+      const fatherHeight = parseFloat(document.getElementById("fatherHeight").value);
+
+      if (!validateChildInputs(name, state, district, age, currentHeight) || isNaN(motherHeight) || isNaN(fatherHeight)) {
+        resultBox.style.display = "block";
+        resultBox.innerHTML = "❌ Please fill all fields correctly.";
+        return;
+      }
+
+      try {
+        // Height 1: reuse method 1
+        const out1 = await calcMethod1(gender, age, currentHeight);
+
+        // Height 2: Mid-Parental Height -> find nearest row in MPH file -> read numeric percentile -> map to nearest P-label -> get adult height
+        const mph = Math.round((motherHeight + fatherHeight) / 2);
+
+        // load MPH — note: these files are arrays (not {data:...})
+        const mphFile = gender === "Male" ? "male mph.json" : "female mph.json";
+        const mphJsonRaw = await (await fetch(mphFile)).json();
+        // Accept both array or {data: array}
+        const mphData = Array.isArray(mphJsonRaw) ? mphJsonRaw : (mphJsonRaw.data || []);
+
+        if (!mphData.length) throw new Error("MPH data not found or empty.");
+
+        // find nearest row by Midparental_m
+        let nearestRow = mphData.reduce((prev, curr) =>
+          Math.abs(curr.Midparental_m - mph) < Math.abs(prev.Midparental_m - mph) ? curr : prev
+        );
+
+        const mphPercentileNumeric = Number(nearestRow.Percentile);
+        if (isNaN(mphPercentileNumeric)) throw new Error("MPH percentile invalid.");
+
+        // Map numeric percentile to the closest percentile label available in growth data
+        // We'll use standard label-to-number mapping:
+        const percentileMap = [
+          { key: "P3", v: 3 },
+          { key: "P10", v: 10 },
+          { key: "P25", v: 25 },
+          { key: "P50", v: 50 },
+          { key: "P75", v: 75 },
+          { key: "P90", v: 90 },
+          { key: "P97", v: 97 }
+        ];
+        const nearestLabelObj = percentileMap.reduce((best, cur) =>
+          Math.abs(cur.v - mphPercentileNumeric) < Math.abs(best.v - mphPercentileNumeric) ? cur : best
+        , percentileMap[3]); // start with P50 as default
+        const nearestLabel = nearestLabelObj.key;
+
+        // Load main growth file and take Age=18 row
+        const file = gender === "Male" ? "Male.json" : "Female.json";
+        const growthRaw = await (await fetch(file)).json();
+        const growthData = growthRaw.data || growthRaw; // accept both patterns
+        const adultRow = growthData.find(r => Number(r.Age) === 18);
+        if (!adultRow) throw new Error("Adult (age 18) row not found in growth file.");
+
+        // predicted height by MPH method
+        let predictedMPH = adultRow[nearestLabel];
+        // fallback if label missing
+        if (predictedMPH === undefined) {
+          // fallback to P50
+          predictedMPH = adultRow["P50"];
+        }
+        const sd2 = Number(predictedMPH) * 0.045;
+        const lowerRange2 = (predictedMPH - sd2).toFixed(2);
+        const upperRange2 = (predictedMPH + sd2).toFixed(2);
+
+        // combine output
+        const out2 = {
+          mph,
+          mphPercentileNumeric,
+          nearestLabel,
+          predictedMPH,
+          lowerRange2,
+          upperRange2
+        };
+
+        showResultBox(formatCombinedOutput(name, state, district, age, currentHeight, motherHeight, fatherHeight, out1, out2));
+
+        // optional: logToSheet({...})
+      } catch (err) {
+        console.error(err);
+        resultBox.style.display = "block";
+        resultBox.innerText = "❌ Error computing Method 2. See console for details.";
+      }
+    }
+
+    // -------------------------------
+    // Helper functions
+    function getChildInputs() {
+      return {
+        name: document.getElementById("name").value.trim(),
+        state: document.getElementById("state").value.trim(),
+        district: document.getElementById("district").value.trim(),
+        gender: document.getElementById("gender").value,
+        age: parseFloat(document.getElementById("age").value),
+        currentHeight: parseFloat(document.getElementById("height").value)
+      };
+    }
+    function validateChildInputs(name, state, district, age, currentHeight) {
+      if (!name || !state || !district || isNaN(age) || isNaN(currentHeight)) {
+        const rb = document.getElementById("results");
+        rb.style.display = "block";
+        rb.innerHTML = "❌ Please fill all child fields correctly.";
+        return false;
+      }
+      return true;
+    }
+
+    async function calcMethod1(gender, age, currentHeight) {
+      const file = gender === "Male" ? "Male.json" : "Female.json";
+      const growthRaw = await (await fetch(file)).json();
+      const data = growthRaw.data || growthRaw; // accept both patterns
+
+      // find surrounding ages
+      const lower = data.reduce((prev, curr) => (curr.Age <= age ? curr : prev), data[0]);
+      const upper = data.find(item => item.Age >= age) || data[data.length - 1];
+      const factor = (age - lower.Age) / (upper.Age - lower.Age || 1);
+
+      const percentiles = Object.keys(lower).filter(k => k !== "Age");
+      const interpolated = {};
+      percentiles.forEach(p => {
+        interpolated[p] = lower[p] + factor * (upper[p] - lower[p]);
+      });
+
+      // nearest percentile label
+      let nearest = percentiles[0], minDiff = Math.abs(interpolated[nearest] - currentHeight);
+      percentiles.forEach(p => {
+        const diff = Math.abs(interpolated[p] - currentHeight);
+        if (diff < minDiff) { minDiff = diff; nearest = p; }
+      });
+
+      const adultRow = data.find(r => Number(r.Age) === 18);
+      const predicted = adultRow[nearest];
+      const sd = Number(predicted) * 0.045;
+      return {
+        nearest,
+        predicted,
+        lowerRange: (predicted - sd).toFixed(2),
+        upperRange: (predicted + sd).toFixed(2)
+      };
+    }
+
+    function formatHeight1Output(name, state, district, age, currentHeight, out) {
+      return `📐 Height 1 (Based on Growth Percentile)
+👤 Name: ${name}
+🌍 ${state}, ${district}
+✅ Current Age: ${age} years
+✅ Current Height: ${currentHeight} cm
+📊 Nearest Percentile: ${out.nearest}
+
+🔮 Predicted Adult Height: ${out.predicted} cm
+Range (±4.5%): ${out.lowerRange} – ${out.upperRange} cm`;
+    }
+
+    function formatCombinedOutput(name, state, district, age, currentHeight, motherHeight, fatherHeight, out1, out2) {
+      return `📐 Height 1 (Based on Growth Percentile)
+👤 Name: ${name}
+🌍 ${state}, ${district}
+✅ Current Age: ${age} years
+✅ Current Height: ${currentHeight} cm
+📊 Nearest Percentile: ${out1.nearest}
+🔮 Predicted Adult Height (Height 1): ${out1.predicted} cm
+Range: ${out1.lowerRange} – ${out1.upperRange} cm
+
+📐 Height 2 (Based on Mid-Parental Height)
+👩 Mother's Height: ${motherHeight} cm
+👨 Father's Height: ${fatherHeight} cm
+⚖️ Mid-Parental Height: ${out2.mph} cm
+📊 MPH numeric percentile: ${out2.mphPercentileNumeric}
+📊 Mapped percentile label used: ${out2.nearestLabel}
+🔮 Predicted Adult Height (Height 2): ${out2.predictedMPH} cm
+Range: ${out2.lowerRange2} – ${out2.upperRange2} cm`;
+    }
+
+    function showResultBox(text) {
+      const resultBox = document.getElementById("results");
+      resultBox.style.display = "block";
+      resultBox.innerText = text;
+    }
+
+    // (Optional) Logging function kept for you if needed:
+    async function logToSheet(payload) {
+      const url = "https://script.google.com/macros/s/AKfycbz73tJdxWhXBMxIjsWcN6WNWLnFkK8OPYpjNIrb0oV5JNj4efTyfDRuh4LMWv7A1BtwaQ/exec";
+      try {
+        await fetch(url, { method: "POST", body: JSON.stringify(payload) });
+        console.log("Logged:", payload);
+      } catch (err) { console.error("Logging failed", err); }
+    }
+  </script>
+</body>
+</html>
